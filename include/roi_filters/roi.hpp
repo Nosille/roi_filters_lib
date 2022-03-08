@@ -8,6 +8,7 @@
 #include <pcl/filters/approximate_voxel_grid.h>  // pcl::ApproximateVoxelGrid
 #include <pcl/filters/passthrough.h>             // pcl::PassThrough
 #include <pcl/filters/voxel_grid.h>              // pcl::VoxelGrid
+#include <pcl/filters/extract_indices.h>         // pcl::ExtractIndices
 #include <vector>
 
 #include "common/common.hpp"    // common::EPSILON
@@ -28,6 +29,24 @@ static void elevationBandPass(float z_limit_min,
         cloud->clear();
 
         pcl::PassThrough<Point> passFilter;
+        passFilter.setFilterFieldName("z");
+        passFilter.setFilterLimits(z_limit_min, z_limit_max);
+        passFilter.setInputCloud(cloud_in);
+        passFilter.filter(*cloud);
+    }
+}
+
+template <typename PointCloud2>
+static void elevationBandPass(float z_limit_min,
+                              float z_limit_max,
+                              typename PointCloud2::Ptr cloud) {
+    if (cloud->size()) {
+        typename PointCloud2::Ptr cloud_in(
+            new PointCloud2);
+        *cloud_in = *cloud;
+        cloud->clear();
+
+        pcl::PassThrough<PointCloud2> passFilter;
         passFilter.setFilterFieldName("z");
         passFilter.setFilterLimits(z_limit_min, z_limit_max);
         passFilter.setInputCloud(cloud_in);
@@ -83,6 +102,49 @@ static void approxVoxelGridFilter(float voxel_size,
 }
 
 /*
+ * @brief Voxel Grid Downsampling
+ * @note
+ *  SegMatch: A voxel grid is then applied to the resulting source cloud,
+ *      in order to filter-out noise in voxels where there is not enough
+ * evidence for occupancy.
+ * @note Configuration follows SegMatch
+ * @note
+ *  voxel_size: 0.1f
+ *  min_point_number_per_voxel: 1
+ */
+static void voxelGridFilter(float voxel_size,
+                            int min_point_number_per_voxel,
+                            typename PointCloud2::Ptr cloud) {
+    if (cloud->height*cloud->width) {
+        typename PointCloud2::Ptr cloud_in(
+            new PointCloud2);
+        *cloud_in = *cloud;
+
+        pcl::VoxelGrid<PointCloud2> voxelFilter;
+        voxelFilter.setLeafSize(voxel_size, voxel_size, voxel_size);
+        voxelFilter.setMinimumPointsNumberPerVoxel(min_point_number_per_voxel);
+        voxelFilter.setInputCloud(cloud_in);
+        voxelFilter.filter(*cloud);
+    }
+}
+
+// static void approxVoxelGridFilter(float voxel_size,
+//                                   int min_point_number_per_voxel,
+//                                   typename PointCloud2::Ptr cloud) {
+//     if (cloud->height*cloud->width) {
+//         typename PointCloud2::Ptr cloud_in(
+//             new PointCloud2);
+//         *cloud_in = *cloud;
+
+//         pcl::ApproximateVoxelGrid<PointCloud2> voxelFilter;
+//         voxelFilter.setLeafSize(voxel_size, voxel_size, voxel_size);
+//         voxelFilter.setMinimumPointsNumberPerVoxel(min_point_number_per_voxel);
+//         voxelFilter.setInputCloud(cloud_in);
+//         voxelFilter.filter(*cloud);
+//     }
+// }
+
+/*
  * @brief Cylinder(middle center[x,y,z], radius_m, height_above_m,
  * height_below_m) Filter
  * @result cloud after filter
@@ -114,6 +176,49 @@ static void cylinderROIFilter(float radius_min,
             }
         }
     }
+}
+
+/*
+ * @brief Cylinder(middle center[x,y,z], radius_m, height_above_m,
+ * height_below_m) Filter
+ * @result cloud after filter
+ */
+static void cylinderROIFilter(float radius_min,
+                              float radius_max,
+                              float z_limit_min,
+                              float z_limit_max,
+                              typename PointCloud2::Ptr cloud) {
+    
+       
+    if (cloud->height*cloud->width) 
+    {
+        typename pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in(new pcl::PointCloud<pcl::PointXYZ>);
+        typename pcl::PointIndices::Ptr indices(new pcl::PointIndices);
+        pcl::fromPCLPointCloud2(*cloud, *cloud_in);
+
+        const double radius_min_squared = pow(radius_min, 2.0);
+        const double radius_max_squared = pow(radius_max, 2.0);
+
+        for (size_t pt = 0u; pt < cloud_in->size(); ++pt) 
+        {
+            const pcl::PointXYZ& point = cloud_in->points[pt];
+            const double dist = common::geometry::calcCylinderDistNorm<pcl::PointXYZ>(point);
+            // Step 1: filter out a large part
+            if (dist > radius_min_squared && dist < radius_max_squared) {
+                if (point.z > z_limit_min && point.z < z_limit_max) {
+                    indices->indices.push_back(pt);
+                }
+            }
+        }
+
+        //Extract keypoints from cloud
+        pcl::ExtractIndices<pcl::PCLPointCloud2> extract_indices_filter;
+        extract_indices_filter.setInputCloud (cloud);
+        extract_indices_filter.setIndices (indices);
+        extract_indices_filter.filter (*cloud);
+  
+    }
+      
 }
 
 /**
@@ -159,6 +264,55 @@ static void squareROIFilter(float radius_min,
     }
 }
 
+/**
+ * @brief forward radius_max(/m), left/right radius_min separately
+ * @note Velodyne Coordinate
+ *          |x(forward)
+ *      C   |   D
+ *          |
+ *  y---------------
+ *          |
+ *      B   |   A
+ */
+static void squareROIFilter(float radius_min,
+                            float radius_max,
+                            float z_limit_min,
+                            float z_limit_max,
+                            typename PointCloud2::Ptr cloud) {
+    
+    if (cloud->height*cloud->width) 
+    {
+        typename pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in(new pcl::PointCloud<pcl::PointXYZ>);
+        typename pcl::PointIndices::Ptr indices(new pcl::PointIndices);
+        pcl::fromPCLPointCloud2(*cloud, *cloud_in);
+
+        const float forward = radius_max;
+        const float back = -radius_max;
+        const float left = -radius_min;
+        const float right = radius_min;
+
+        for (size_t pt = 0u; pt < cloud_in->size(); ++pt) {
+            const pcl::PointXYZ& point = cloud_in->points[pt];
+            // Step 1: filter out a large part
+            if (point.y > left && point.y < right) {
+                // Step 2: filter out small part
+                if (point.z > z_limit_min && point.z < z_limit_max) {
+                    // Step 3: almost not filter out
+                    if (point.x > back && point.x < forward) {
+                       indices->indices.push_back(pt);
+                    }
+                }
+            }
+        }
+
+        //Extract keypoints from cloud
+        pcl::ExtractIndices<pcl::PCLPointCloud2> extract_indices_filter;
+        extract_indices_filter.setInputCloud (cloud);
+        extract_indices_filter.setIndices (indices);
+        extract_indices_filter.filter (*cloud);
+    }
+}
+
 template <typename PointT>
 static void applyROIFilter(const ROIParams& params,
                            typename pcl::PointCloud<PointT>::Ptr cloud) {
@@ -177,6 +331,27 @@ static void applyROIFilter(const ROIParams& params,
                                 roi_z_limit_max, cloud);
     } else {
         cylinderROIFilter<PointI>(roi_radius_min, roi_radius_max,
+                                  roi_z_limit_min, roi_z_limit_max, cloud);
+    }
+}
+
+static void applyROIFilter(const ROIParams& params,
+                           typename PointCloud2::Ptr cloud) {
+    const float roi_radius_min = params.roi_radius_min_m;
+    const float roi_radius_max = params.roi_radius_max_m;
+    const float roi_z_limit_min =
+        (-1.0) * (params.roi_lidar_height_m + params.roi_height_below_m);
+    const float roi_z_limit_max =
+        params.roi_height_above_m - params.roi_lidar_height_m;
+
+    if (params.type == "Cylinder") {
+        cylinderROIFilter(roi_radius_min, roi_radius_max,
+                                  roi_z_limit_min, roi_z_limit_max, cloud);
+    } else if (params.type == "Square") {
+        squareROIFilter(roi_radius_min, roi_radius_max, roi_z_limit_min,
+                                roi_z_limit_max, cloud);
+    } else {
+        cylinderROIFilter(roi_radius_min, roi_radius_max,
                                   roi_z_limit_min, roi_z_limit_max, cloud);
     }
 }
